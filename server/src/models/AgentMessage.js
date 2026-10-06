@@ -31,6 +31,7 @@ const agentMessageSchema = new mongoose.Schema(
           name: { type: String },
           arguments: { type: String },
         },
+        thoughtSignature: { type: String },
       },
     ],
     toolCallId: {

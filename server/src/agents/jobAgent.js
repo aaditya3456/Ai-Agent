@@ -85,12 +85,18 @@ export const runAgentTurn = async ({ conversationId, userId, userMessageText, on
 
       // Execute each requested tool
       for (const call of assistantMsg.tool_calls) {
-        const functionName = call.function.name;
+        const functionName = call.function?.name;
+        const callId = call.id || `call_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
         let functionArgs = {};
         try {
-          functionArgs = JSON.parse(call.function.arguments || '{}');
+          if (typeof call.function?.arguments === 'object' && call.function.arguments !== null) {
+            functionArgs = call.function.arguments;
+          } else if (typeof call.function?.arguments === 'string') {
+            functionArgs = JSON.parse(call.function.arguments || '{}');
+          }
         } catch (e) {
           logger.warn(`Failed to parse arguments for tool ${functionName}`, e);
+          functionArgs = {};
         }
 
         const actionLabel = toolActionLabels[functionName] || `Executing ${functionName}`;
@@ -107,12 +113,14 @@ export const runAgentTurn = async ({ conversationId, userId, userMessageText, on
 
         onActionStep({ step: actionLabel, status: 'completed' });
 
+        const serializedResult = typeof toolResult === 'string' ? toolResult : JSON.stringify(toolResult);
+
         // Add tool response to LLM context
         llmMessages.push({
           role: 'tool',
-          tool_call_id: call.id,
+          tool_call_id: callId,
           name: functionName,
-          content: JSON.stringify(toolResult),
+          content: serializedResult,
         });
 
         // Save tool response message in database
@@ -120,9 +128,9 @@ export const runAgentTurn = async ({ conversationId, userId, userMessageText, on
           conversationId,
           userId,
           role: 'tool',
-          toolCallId: call.id,
+          toolCallId: callId,
           toolName: functionName,
-          content: JSON.stringify(toolResult),
+          content: serializedResult,
         });
       }
     } else {

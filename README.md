@@ -132,10 +132,10 @@ cp .env.example .env
 | `MONGODB_URI` | MongoDB connection string | `mongodb://127.0.0.1:27017/ai_job_agent` |
 | `JWT_SECRET` | Secret key used to sign JWT session tokens | `super_secret_jwt_key_...` |
 | `JWT_EXPIRES_IN` | Session duration | `7d` |
-| `AI_PROVIDER` | LLM service provider | `openai` |
-| `AI_API_KEY` | API key for OpenAI, Groq, or compatible provider | *(Optional; fallback mode enabled if omitted)* |
-| `AI_MODEL` | Target language model | `gpt-4o-mini` |
-| `AI_BASE_URL` | Base URL for OpenAI API or alternative providers | `https://api.openai.com/v1` |
+| `AI_PROVIDER` | LLM service provider (`gemini` or `openai`) | `gemini` |
+| `AI_API_KEY` | API key for Google Gemini or OpenAI | *(Optional; deterministic fallback mode enabled if omitted)* |
+| `AI_MODEL` | Target language model | `gemini-1.5-flash` (or `gpt-4o-mini` if using OpenAI) |
+| `AI_BASE_URL` | Base URL for LLM provider endpoint | `https://generativelanguage.googleapis.com/v1beta/openai/` |
 | `CLIENT_URL` | Allowed client origin for CORS | `http://localhost:5173` |
 
 ---

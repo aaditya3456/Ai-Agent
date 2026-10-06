@@ -1,18 +1,267 @@
 import OpenAI from 'openai';
+import { GoogleGenAI } from '@google/genai';
 import { env } from '../config/env.js';
 import { logger } from '../utils/logger.js';
 import { AppError } from '../middleware/errorMiddleware.js';
 
 let openaiClient = null;
+let currentOpenAIKey = '';
+let currentOpenAIBaseUrl = '';
 
-const getClient = () => {
-  if (!openaiClient && env.AI_API_KEY) {
+let geminiClient = null;
+let currentGeminiKey = '';
+
+export const getGeminiClient = () => {
+  if (!env.AI_API_KEY) {
+    return null;
+  }
+  const key = env.AI_API_KEY;
+  if (!geminiClient || currentGeminiKey !== key) {
+    geminiClient = new GoogleGenAI({ apiKey: key });
+    currentGeminiKey = key;
+  }
+  return geminiClient;
+};
+
+export const getOpenAIClient = () => {
+  if (!env.AI_API_KEY) {
+    return null;
+  }
+  const key = env.AI_API_KEY;
+  const baseUrl = env.AI_BASE_URL || 'https://api.openai.com/v1';
+
+  if (!openaiClient || currentOpenAIKey !== key || currentOpenAIBaseUrl !== baseUrl) {
     openaiClient = new OpenAI({
-      apiKey: env.AI_API_KEY,
-      baseURL: env.AI_BASE_URL || 'https://api.openai.com/v1',
+      apiKey: key,
+      baseURL: baseUrl,
     });
+    currentOpenAIKey = key;
+    currentOpenAIBaseUrl = baseUrl;
   }
   return openaiClient;
+};
+
+export const getClient = () => {
+  return env.AI_PROVIDER === 'gemini' ? getGeminiClient() : getOpenAIClient();
+};
+
+/**
+ * Maps OpenAI JSON Schema property types to Gemini uppercase types.
+ */
+const mapSchemaType = (t) => {
+  if (!t) return 'STRING';
+  const upper = String(t).toUpperCase();
+  if (upper === 'INT') return 'INTEGER';
+  return upper;
+};
+
+const mapPropertyToGemini = (prop = {}) => {
+  const result = {
+    type: mapSchemaType(prop.type),
+    description: prop.description || '',
+  };
+  if (Array.isArray(prop.enum)) {
+    result.enum = prop.enum;
+  }
+  if (prop.items) {
+    result.items = mapPropertyToGemini(prop.items);
+  }
+  if (prop.properties) {
+    result.properties = {};
+    for (const [k, v] of Object.entries(prop.properties)) {
+      result.properties[k] = mapPropertyToGemini(v);
+    }
+  }
+  return result;
+};
+
+/**
+ * Converts OpenAI function tool specifications into Google Gemini function declarations format.
+ */
+export const convertOpenAIToolsToGemini = (openaiTools = []) => {
+  if (!Array.isArray(openaiTools) || openaiTools.length === 0) {
+    return undefined;
+  }
+
+  const functionDeclarations = openaiTools
+    .filter((t) => t?.type === 'function' && t.function?.name)
+    .map((t) => {
+      const fn = t.function;
+      const cleanProperties = {};
+      const origProps = fn.parameters?.properties || {};
+
+      for (const [key, prop] of Object.entries(origProps)) {
+        cleanProperties[key] = mapPropertyToGemini(prop);
+      }
+
+      return {
+        name: fn.name,
+        description: fn.description || '',
+        parameters: {
+          type: 'OBJECT',
+          properties: cleanProperties,
+          required: Array.isArray(fn.parameters?.required) ? fn.parameters.required : [],
+        },
+      };
+    });
+
+  return functionDeclarations.length > 0 ? [{ functionDeclarations }] : undefined;
+};
+
+/**
+ * Converts OpenAI conversation messages into Gemini native contents and systemInstruction.
+ */
+export const convertOpenAIMessagesToGemini = (messages = []) => {
+  let systemInstruction = '';
+  const contents = [];
+
+  for (const msg of messages) {
+    if (!msg) continue;
+
+    if (msg.role === 'system') {
+      systemInstruction += (systemInstruction ? '\n' : '') + (msg.content || '');
+      continue;
+    }
+
+    if (msg.role === 'user') {
+      contents.push({
+        role: 'user',
+        parts: [{ text: msg.content || '' }],
+      });
+      continue;
+    }
+
+    if (msg.role === 'assistant') {
+      const parts = [];
+      if (msg.content) {
+        parts.push({ text: msg.content });
+      }
+
+      if (Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
+        for (const tc of msg.tool_calls) {
+          let args = {};
+          try {
+            args = typeof tc.function?.arguments === 'string'
+              ? JSON.parse(tc.function.arguments || '{}')
+              : (tc.function?.arguments || {});
+          } catch {
+            args = {};
+          }
+
+          // If thoughtSignature is present, emit native functionCall part
+          if (tc.thoughtSignature) {
+            parts.push({
+              functionCall: {
+                name: tc.function?.name,
+                args,
+                id: tc.id,
+              },
+              thoughtSignature: tc.thoughtSignature,
+            });
+          } else if (!msg.content) {
+            // Conversational fallback for old history items lacking signatures
+            parts.push({ text: `Examined ${tc.function?.name || 'action'}` });
+          }
+        }
+      }
+
+      if (parts.length === 0) {
+        parts.push({ text: '' });
+      }
+
+      contents.push({ role: 'model', parts });
+      continue;
+    }
+
+    if (msg.role === 'tool') {
+      let parsed = {};
+      try {
+        parsed = typeof msg.content === 'string' ? JSON.parse(msg.content) : msg.content;
+      } catch {
+        parsed = { result: msg.content };
+      }
+
+      const prev = contents[contents.length - 1];
+      const prevHasFunctionCall = prev && prev.role === 'model' && prev.parts?.some((p) => p.functionCall);
+      const prevIsToolUserTurn = prev && prev.role === 'user' && prev.parts?.some((p) => p.functionResponse);
+
+      if (prevHasFunctionCall || prevIsToolUserTurn) {
+        const responsePart = {
+          functionResponse: {
+            name: msg.name || msg.toolName || 'tool',
+            response: parsed && typeof parsed === 'object' ? parsed : { result: parsed },
+            id: msg.tool_call_id || msg.toolCallId,
+          },
+        };
+
+        if (prevIsToolUserTurn) {
+          prev.parts.push(responsePart);
+        } else {
+          contents.push({
+            role: 'user',
+            parts: [responsePart],
+          });
+        }
+      } else {
+        // Conversational fallback when history lacks paired function call
+        const serialized = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content);
+        contents.push({
+          role: 'user',
+          parts: [{ text: `[Tool result: ${serialized}]` }],
+        });
+      }
+    }
+  }
+
+  return { systemInstruction, contents };
+};
+
+/**
+ * Formats, categorizes, and logs provider-specific errors without leaking sensitive API keys.
+ */
+export const formatAIError = (error, context = 'operation') => {
+  const provider = env.AI_PROVIDER === 'openai' ? 'OpenAI' : 'Gemini';
+  const status = error?.status || error?.statusCode || error?.response?.status;
+  let rawMessage = error?.message || 'Unknown provider error';
+
+  try {
+    const parsed = JSON.parse(rawMessage);
+    if (parsed.error?.message) {
+      rawMessage = `${parsed.error.code || status || ''}: ${parsed.error.message}`.trim();
+    }
+  } catch {
+    // rawMessage is regular text
+  }
+
+  // Mask any key parameter from URLs or error text
+  const sanitizedMessage = rawMessage
+    .replace(/key=[A-Za-z0-9_-]+/gi, 'key=[REDACTED]')
+    .replace(/API key [A-Za-z0-9_-]+/gi, 'API key [REDACTED]');
+
+  let errorType = `${provider} general error`;
+
+  if (status === 401 || status === 403 || /api[-_ ]?key|unauthorized|forbidden|permission/i.test(sanitizedMessage)) {
+    errorType = `${provider} API authentication error`;
+  } else if (status === 429 || status === 503 || /quota|rate[-_ ]?limit|resource[-_ ]?exhausted|credits|high demand|unavailable/i.test(sanitizedMessage)) {
+    errorType = `${provider} quota/rate-limit error`;
+  } else if (status === 404 || /model.*not found|unsupported model|not supported/i.test(sanitizedMessage)) {
+    errorType = `${provider} model error`;
+  } else if (/tool|function/i.test(context) || /function[-_ ]?call|tool[-_ ]?call/i.test(sanitizedMessage)) {
+    errorType = `${provider} tool-calling error`;
+  }
+
+  logger.error(`[${errorType}] during ${context}: ${sanitizedMessage}`, {
+    provider: env.AI_PROVIDER,
+    status,
+    context,
+  });
+
+  return {
+    provider: env.AI_PROVIDER,
+    errorType,
+    status,
+    message: sanitizedMessage,
+  };
 };
 
 // Safe JSON parser that handles codeblocks and partial JSON
@@ -608,9 +857,8 @@ const fallbackJobParser = (description) => {
  * Parse Resume Profile using LLM Structured Output with graceful fallback.
  */
 export const parseResumeProfile = async (rawText) => {
-  const client = getClient();
-  if (!client || !env.AI_API_KEY) {
-    logger.info('No AI_API_KEY provided; using deterministic structured text extractor for resume.');
+  if (!env.AI_API_KEY) {
+    logger.info(`No AI_API_KEY provided; using deterministic structured text extractor for resume (${env.AI_PROVIDER}).`);
     return fallbackResumeParser(rawText);
   }
 
@@ -662,23 +910,46 @@ Return valid JSON adhering exactly to this structure:
 }`;
 
   try {
-    const response = await client.chat.completions.create({
-      model: env.AI_MODEL,
-      messages: [
-        { role: 'system', content: 'You are an accurate resume parser. You output strictly structured JSON without markdown.' },
-        { role: 'user', content: prompt },
-      ],
-      response_format: { type: 'json_object' },
-      temperature: 0.1,
-    });
+    let rawJsonText = '';
 
-    const parsed = parseSafeJson(response.choices[0]?.message?.content, null);
+    if (env.AI_PROVIDER === 'gemini') {
+      const client = getGeminiClient();
+      if (!client) return fallbackResumeParser(rawText);
+
+      const response = await client.models.generateContent({
+        model: env.AI_MODEL,
+        contents: prompt,
+        config: {
+          systemInstruction: 'You are an accurate resume parser. You output strictly structured JSON without markdown.',
+          responseMimeType: 'application/json',
+          temperature: 0.1,
+        },
+      });
+      rawJsonText = response.text;
+    } else {
+      const client = getOpenAIClient();
+      if (!client) return fallbackResumeParser(rawText);
+
+      const response = await client.chat.completions.create({
+        model: env.AI_MODEL,
+        messages: [
+          { role: 'system', content: 'You are an accurate resume parser. You output strictly structured JSON without markdown.' },
+          { role: 'user', content: prompt },
+        ],
+        response_format: { type: 'json_object' },
+        temperature: 0.1,
+      });
+      rawJsonText = response.choices[0]?.message?.content;
+    }
+
+    const parsed = parseSafeJson(rawJsonText, null);
     if (!parsed) {
       throw new Error('LLM returned invalid JSON structure');
     }
     return normalizeResumeProfile(parsed, rawText);
   } catch (error) {
-    logger.error(`AI resume parsing failed: ${error.message}, falling back to deterministic extractor`, error);
+    const formatted = formatAIError(error, 'resume parsing');
+    logger.error(`AI resume parsing failed (${formatted.errorType}), falling back to deterministic extractor`);
     return fallbackResumeParser(rawText);
   }
 };
@@ -687,9 +958,8 @@ Return valid JSON adhering exactly to this structure:
  * Analyze Job Description using LLM Structured Output.
  */
 export const analyzeJobDescription = async (description, title = '', company = '') => {
-  const client = getClient();
-  if (!client || !env.AI_API_KEY) {
-    logger.info('No AI_API_KEY provided; using deterministic job analyzer.');
+  if (!env.AI_API_KEY) {
+    logger.info(`No AI_API_KEY provided; using deterministic job analyzer (${env.AI_PROVIDER}).`);
     return fallbackJobParser(description);
   }
 
@@ -723,23 +993,46 @@ Return strictly valid JSON:
 }`;
 
   try {
-    const response = await client.chat.completions.create({
-      model: env.AI_MODEL,
-      messages: [
-        { role: 'system', content: 'You are a technical recruiter. Extract structured job criteria strictly in valid JSON.' },
-        { role: 'user', content: prompt },
-      ],
-      response_format: { type: 'json_object' },
-      temperature: 0.1,
-    });
+    let rawJsonText = '';
 
-    const parsed = parseSafeJson(response.choices[0]?.message?.content, null);
+    if (env.AI_PROVIDER === 'gemini') {
+      const client = getGeminiClient();
+      if (!client) return fallbackJobParser(description);
+
+      const response = await client.models.generateContent({
+        model: env.AI_MODEL,
+        contents: prompt,
+        config: {
+          systemInstruction: 'You are a technical recruiter. Extract structured job criteria strictly in valid JSON.',
+          responseMimeType: 'application/json',
+          temperature: 0.1,
+        },
+      });
+      rawJsonText = response.text;
+    } else {
+      const client = getOpenAIClient();
+      if (!client) return fallbackJobParser(description);
+
+      const response = await client.chat.completions.create({
+        model: env.AI_MODEL,
+        messages: [
+          { role: 'system', content: 'You are a technical recruiter. Extract structured job criteria strictly in valid JSON.' },
+          { role: 'user', content: prompt },
+        ],
+        response_format: { type: 'json_object' },
+        temperature: 0.1,
+      });
+      rawJsonText = response.choices[0]?.message?.content;
+    }
+
+    const parsed = parseSafeJson(rawJsonText, null);
     if (!parsed) {
       throw new Error('LLM returned invalid JSON for job analysis');
     }
     return parsed;
   } catch (error) {
-    logger.error(`AI job analysis failed: ${error.message}, using fallback`, error);
+    const formatted = formatAIError(error, 'job analysis');
+    logger.error(`AI job analysis failed (${formatted.errorType}), using fallback`);
     return fallbackJobParser(description);
   }
 };
@@ -748,8 +1041,6 @@ Return strictly valid JSON:
  * Generate Customized Application Message based strictly on real resume data.
  */
 export const generateCustomizedMessage = async ({ resumeProfile, jobTitle, company, jobDescription, tone = 'Professional' }) => {
-  const client = getClient();
-
   const skillsList = [
     ...(resumeProfile.programmingLanguages || []),
     ...(resumeProfile.frameworks || []),
@@ -760,7 +1051,7 @@ export const generateCustomizedMessage = async ({ resumeProfile, jobTitle, compa
   const recentRole = resumeProfile.experience?.[0]?.title ? `${resumeProfile.experience[0].title} at ${resumeProfile.experience[0].company}` : 'Software Developer';
   const projectsSummary = (resumeProfile.projects || []).slice(0, 2).map((p) => p.name).join(', ');
 
-  if (!client || !env.AI_API_KEY) {
+  if (!env.AI_API_KEY) {
     // Deterministic personalized template
     return `Dear Hiring Team at ${company},\n\nI am writing to express my strong interest in the ${jobTitle} position. With my background as a ${recentRole} and hands-on experience in ${skillsList || 'full-stack software development'}, I am confident in my ability to contribute effectively to your engineering goals.\n\nIn my previous projects${projectsSummary ? ` (such as ${projectsSummary})` : ''}, I focused on delivering scalable, maintainable solutions and collaborating across teams to solve complex technical challenges.\n\nThank you for considering my application. I look forward to the opportunity to discuss how my technical skills align with the needs at ${company}.\n\nSincerely,\nCandidate`;
   }
@@ -787,32 +1078,54 @@ TARGET JOB:
 Generate the application message directly as plain text.`;
 
   try {
-    const response = await client.chat.completions.create({
-      model: env.AI_MODEL,
-      messages: [
-        { role: 'system', content: 'You are an authentic career advisor writing tailored, non-fluffy application messages grounded solely in factual candidate history.' },
-        { role: 'user', content: prompt },
-      ],
-      temperature: 0.4,
-    });
+    if (env.AI_PROVIDER === 'gemini') {
+      const client = getGeminiClient();
+      if (!client) {
+        throw new Error('Failed to initialize Google Gemini client');
+      }
 
-    return response.choices[0]?.message?.content?.trim();
+      const response = await client.models.generateContent({
+        model: env.AI_MODEL,
+        contents: prompt,
+        config: {
+          systemInstruction: 'You are an authentic career advisor writing tailored, non-fluffy application messages grounded solely in factual candidate history.',
+          temperature: 0.4,
+        },
+      });
+
+      return response.text?.trim();
+    } else {
+      const client = getOpenAIClient();
+      if (!client) {
+        throw new Error('Failed to initialize OpenAI client');
+      }
+
+      const response = await client.chat.completions.create({
+        model: env.AI_MODEL,
+        messages: [
+          { role: 'system', content: 'You are an authentic career advisor writing tailored, non-fluffy application messages grounded solely in factual candidate history.' },
+          { role: 'user', content: prompt },
+        ],
+        temperature: 0.4,
+      });
+
+      return response.choices[0]?.message?.content?.trim();
+    }
   } catch (error) {
-    logger.error(`AI message generation failed: ${error.message}`, error);
-    throw new AppError(`Failed to generate application message: ${error.message}`, 500, 'AI_GENERATION_FAILED');
+    const formatted = formatAIError(error, 'application message generation');
+    throw new AppError(`Failed to generate application message (${formatted.errorType}): ${formatted.message}`, 500, 'AI_GENERATION_FAILED');
   }
 };
 
 /**
- * Universal Tool Calling interface with LLM.
+ * Universal Tool Calling interface with LLM supporting both Google Gemini Native API and OpenAI.
  */
 export const callLLMWithTools = async ({ messages, tools, toolChoice = 'auto' }) => {
-  const client = getClient();
-  if (!client || !env.AI_API_KEY) {
+  if (!env.AI_API_KEY) {
     return {
       message: {
         role: 'assistant',
-        content: 'AI Agent is currently operating in local mode (AI_API_KEY not configured). You can still query jobs, view matches, and manage applications using the dashboard and tabs, or configure AI_API_KEY in your .env file to enable live LLM reasoning.',
+        content: `AI Agent is currently operating in local mode (AI_API_KEY not configured for ${env.AI_PROVIDER}). You can still query jobs, view matches, and manage applications using the dashboard and tabs, or configure AI_API_KEY in your .env file to enable live LLM reasoning.`,
         tool_calls: null,
       },
       finish_reason: 'stop',
@@ -820,21 +1133,92 @@ export const callLLMWithTools = async ({ messages, tools, toolChoice = 'auto' })
   }
 
   try {
-    const response = await client.chat.completions.create({
-      model: env.AI_MODEL,
-      messages,
-      tools,
-      tool_choice: toolChoice,
-      temperature: 0.2,
-    });
+    if (env.AI_PROVIDER === 'gemini') {
+      const client = getGeminiClient();
+      if (!client) {
+        throw new Error('Failed to initialize Google Gemini client');
+      }
 
-    const choice = response.choices[0];
-    return {
-      message: choice.message,
-      finish_reason: choice.finish_reason,
-    };
+      const { systemInstruction, contents } = convertOpenAIMessagesToGemini(messages);
+      const geminiTools = convertOpenAIToolsToGemini(tools);
+
+      const config = {
+        temperature: 0.2,
+      };
+      if (systemInstruction) {
+        config.systemInstruction = systemInstruction;
+      }
+      if (geminiTools) {
+        config.tools = geminiTools;
+      }
+
+      const response = await client.models.generateContent({
+        model: env.AI_MODEL,
+        contents,
+        config,
+      });
+
+      const candidate = response.candidates?.[0];
+      if (!candidate) {
+        throw new Error('No candidate choices returned by Gemini model');
+      }
+
+      const parts = candidate.content?.parts || [];
+      const textParts = parts.filter((p) => typeof p.text === 'string' && p.text.trim().length > 0);
+      const textContent = textParts.map((p) => p.text).join('\n').trim() || null;
+
+      const functionCallParts = parts.filter((p) => Boolean(p.functionCall));
+      const toolCalls = functionCallParts.map((p) => ({
+        id: p.functionCall.id || `call_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        type: 'function',
+        function: {
+          name: p.functionCall.name,
+          arguments: typeof p.functionCall.args === 'string'
+            ? p.functionCall.args
+            : JSON.stringify(p.functionCall.args || {}),
+        },
+        thoughtSignature: p.thoughtSignature,
+      }));
+
+      return {
+        message: {
+          role: 'assistant',
+          content: textContent,
+          tool_calls: toolCalls.length > 0 ? toolCalls : null,
+        },
+        finish_reason: toolCalls.length > 0 ? 'tool_calls' : (candidate.finishReason?.toLowerCase() || 'stop'),
+      };
+    } else {
+      const client = getOpenAIClient();
+      if (!client) {
+        throw new Error('Failed to initialize OpenAI client');
+      }
+
+      const payload = {
+        model: env.AI_MODEL,
+        messages,
+        temperature: 0.2,
+      };
+
+      if (tools && tools.length > 0) {
+        payload.tools = tools;
+        payload.tool_choice = toolChoice;
+      }
+
+      const response = await client.chat.completions.create(payload);
+
+      const choice = response.choices?.[0];
+      if (!choice) {
+        throw new Error('No choices returned by LLM provider response');
+      }
+
+      return {
+        message: choice.message,
+        finish_reason: choice.finish_reason,
+      };
+    }
   } catch (error) {
-    logger.error(`LLM Tool calling error: ${error.message}`, error);
-    throw new AppError(`LLM call failed: ${error.message}`, 502, 'AI_PROVIDER_ERROR');
+    const formatted = formatAIError(error, 'tool-calling execution');
+    throw new AppError(`LLM call failed (${formatted.errorType}): ${formatted.message}`, 502, 'AI_PROVIDER_ERROR');
   }
 };
