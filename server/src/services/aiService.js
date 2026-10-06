@@ -39,39 +39,534 @@ const parseSafeJson = (text, fallback = {}) => {
   }
 };
 
+const getEmptyProfile = () => ({
+  professionalSummary: '',
+  programmingLanguages: [],
+  frameworks: [],
+  databases: [],
+  tools: [],
+  otherSkills: [],
+  experience: [],
+  education: [],
+  projects: [],
+  certifications: [],
+});
+
+/**
+ * Helper to parse experience entries from identified lines or whole text
+ */
+const parseExperienceSection = (expLines, allLines) => {
+  const targetLines = expLines.length > 0 ? expLines : allLines;
+  const entries = [];
+  let currentEntry = null;
+
+  const TITLE_KEYWORDS = /(?:developer|engineer|manager|architect|consultant|lead|specialist|analyst|programmer|administrator|officer|designer|intern|associate|director|vp|head|scientist|technician|writer|assistant|coordinator)/i;
+  const DATE_REGEX = /[\(\[]?((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|[0-9]{1,2}\/)?\s*[0-9]{4}\s*(?:-|–|to)\s*(?:Present|Current|Now|[0-9]{4}|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|[0-9]{1,2}\/)?\s*[0-9]{4}))[\)\]]?/i;
+  const BULLET_REGEX = /^[-*•–·]\s*(.*)$/;
+
+  for (let i = 0; i < targetLines.length; i++) {
+    const rawLine = targetLines[i].trim();
+    if (!rawLine) continue;
+
+    const bulletMatch = rawLine.match(BULLET_REGEX);
+    if (bulletMatch && currentEntry) {
+      const achievement = bulletMatch[1].trim();
+      if (achievement) {
+        currentEntry.achievements.push(achievement);
+      }
+      continue;
+    }
+
+    const dateMatch = rawLine.match(DATE_REGEX);
+    const hasTitleKeyword = TITLE_KEYWORDS.test(rawLine);
+    const hasCompanySeparator = /\s+(?:at|@|\||-)\s+/i.test(rawLine) || rawLine.includes(',');
+
+    const isHeaderLine = expLines.length > 0
+      ? (dateMatch || hasTitleKeyword || hasCompanySeparator || !currentEntry)
+      : (dateMatch && hasTitleKeyword);
+
+    if (isHeaderLine) {
+      if (currentEntry) {
+        entries.push(currentEntry);
+      }
+
+      let lineWithoutDate = rawLine;
+      let startDate = '';
+      let endDate = '';
+      let isCurrent = false;
+
+      if (dateMatch) {
+        const fullDateStr = dateMatch[1];
+        lineWithoutDate = rawLine.replace(dateMatch[0], '').replace(/[\(\[\)\]]/g, '').trim();
+        const dateParts = fullDateStr.split(/\s*(?:-|–|to)\s*/i);
+        startDate = dateParts[0]?.trim() || '';
+        endDate = dateParts[1]?.trim() || '';
+        isCurrent = /present|current|now/i.test(endDate);
+      }
+
+      let title = '';
+      let company = '';
+
+      if (/\s+(?:at|@)\s+/i.test(lineWithoutDate)) {
+        const parts = lineWithoutDate.split(/\s+(?:at|@)\s+/i);
+        title = parts[0]?.trim();
+        company = parts[1]?.trim();
+      } else if (lineWithoutDate.includes('|')) {
+        const parts = lineWithoutDate.split('|');
+        title = parts[0]?.trim();
+        company = parts[1]?.trim();
+      } else if (lineWithoutDate.includes(' - ')) {
+        const parts = lineWithoutDate.split(' - ');
+        if (TITLE_KEYWORDS.test(parts[0])) {
+          title = parts[0]?.trim();
+          company = parts[1]?.trim();
+        } else {
+          company = parts[0]?.trim();
+          title = parts[1]?.trim();
+        }
+      } else if (lineWithoutDate.includes(',')) {
+        const parts = lineWithoutDate.split(',');
+        title = parts[0]?.trim();
+        company = parts.slice(1).join(',').trim();
+      } else {
+        title = lineWithoutDate;
+      }
+
+      currentEntry = {
+        title: title || 'Software Engineer',
+        company: company || '',
+        location: '',
+        startDate,
+        endDate,
+        current: isCurrent,
+        description: '',
+        achievements: [],
+      };
+    } else if (currentEntry) {
+      if (rawLine.length > 20) {
+        currentEntry.achievements.push(rawLine);
+      } else if (!currentEntry.company) {
+        currentEntry.company = rawLine;
+      }
+    }
+  }
+
+  if (currentEntry) {
+    entries.push(currentEntry);
+  }
+
+  entries.forEach((e) => {
+    if (!e.description && e.achievements.length > 0) {
+      e.description = e.achievements.join(' ');
+    }
+  });
+
+  return entries;
+};
+
+/**
+ * Helper to parse education entries
+ */
+const parseEducationSection = (eduLines, allLines) => {
+  const targetLines = eduLines.length > 0 ? eduLines : allLines;
+  const entries = [];
+
+  const DEGREE_REGEX = /(?:B\.?S\.?|B\.?A\.?|B\.?Sc|B\.?Tech|B\.?E\.?|M\.?S\.?|M\.?A\.?|M\.?Sc|M\.?Tech|MBA|Ph\.?D\.?|Bachelor(?:'s)?(?:\s+of\s+[A-Za-z]+)?|Master(?:'s)?(?:\s+of\s+[A-Za-z]+)?|Associate(?:'s)?|Diploma)/i;
+  const YEAR_REGEX = /\b((?:19|20)\d{2})\b/;
+  const INSTITUTION_KEYWORDS = /(?:University|College|Institute|School|Academy|Polytechnic)/i;
+
+  for (let i = 0; i < targetLines.length; i++) {
+    const rawLine = targetLines[i].trim().replace(/^[-*•–·]\s*/, '');
+    if (!rawLine) continue;
+
+    const hasDegree = DEGREE_REGEX.test(rawLine);
+    const hasInstitution = INSTITUTION_KEYWORDS.test(rawLine);
+
+    if (eduLines.length > 0 || hasDegree || hasInstitution) {
+      const yearMatch = rawLine.match(YEAR_REGEX);
+      const year = yearMatch ? yearMatch[1] : '';
+
+      const parts = rawLine.split(',').map((p) => p.trim());
+
+      let degree = '';
+      let fieldOfStudy = '';
+      let institution = '';
+
+      parts.forEach((p) => {
+        if (DEGREE_REGEX.test(p)) {
+          degree = p;
+          const inMatch = p.match(/(?:in|of)\s+([^,]+)/i);
+          if (inMatch) {
+            fieldOfStudy = inMatch[1].trim();
+            degree = p.replace(/(?:in|of)\s+[^,]+/i, '').trim();
+          }
+        } else if (INSTITUTION_KEYWORDS.test(p) || (!institution && p.length > 3 && !YEAR_REGEX.test(p))) {
+          institution = p;
+        }
+      });
+
+      if (!degree && hasDegree) {
+        const degMatch = rawLine.match(DEGREE_REGEX);
+        degree = degMatch ? degMatch[0] : '';
+      }
+
+      if (!fieldOfStudy) {
+        const inMatch = rawLine.match(/(?:in|of)\s+([A-Za-z\s]+?)(?:,|$|\b(?:at|from)\b)/i);
+        if (inMatch) fieldOfStudy = inMatch[1].trim();
+      }
+
+      if (!institution && hasInstitution) {
+        const instMatch = rawLine.match(/([A-Za-z\s]+(?:University|College|Institute|School|Academy)[A-Za-z\s]*)/i);
+        if (instMatch) institution = instMatch[1].trim();
+      }
+
+      if (degree || institution || fieldOfStudy) {
+        entries.push({
+          institution: institution || (parts[1] && !YEAR_REGEX.test(parts[1]) ? parts[1] : 'University'),
+          degree: degree || 'Degree',
+          fieldOfStudy: fieldOfStudy || '',
+          graduationYear: year,
+        });
+      }
+    }
+  }
+
+  return entries;
+};
+
+/**
+ * Helper to parse project entries
+ */
+const parseProjectsSection = (projLines, allLines, knownSkills = []) => {
+  const targetLines = projLines.length > 0 ? projLines : allLines;
+  const entries = [];
+  let currentProject = null;
+
+  const BULLET_REGEX = /^[-*•–·]\s*(.*)$/;
+  const URL_REGEX = /(https?:\/\/[^\s]+|github\.com\/[^\s]+)/i;
+
+  for (let i = 0; i < targetLines.length; i++) {
+    const rawLine = targetLines[i].trim();
+    if (!rawLine) continue;
+
+    // Check if line matches "- Name: Description" or "Name: Description"
+    const colonMatch = rawLine.match(/^[-*•–·]?\s*([^:]{3,40}):\s*(.+)$/);
+    if (colonMatch) {
+      if (currentProject) entries.push(currentProject);
+
+      const name = colonMatch[1].trim();
+      const desc = colonMatch[2].trim();
+      const matchedTech = knownSkills.filter((s) => new RegExp(`\\b${s.replace('+', '\\+')}\\b`, 'i').test(desc));
+      const urlMatch = desc.match(URL_REGEX);
+
+      currentProject = {
+        name,
+        description: desc,
+        technologies: Array.from(new Set(matchedTech)),
+        link: urlMatch ? urlMatch[0] : '',
+      };
+      continue;
+    }
+
+    // Check for "- Name - Description" or "Name | Description"
+    const sepMatch = rawLine.match(/^[-*•–·]?\s*([A-Za-z0-9\s]{3,35})\s*[|–-]\s*(.+)$/);
+    if (sepMatch && !rawLine.toLowerCase().includes('http')) {
+      if (currentProject) entries.push(currentProject);
+
+      const name = sepMatch[1].trim();
+      const desc = sepMatch[2].trim();
+      const matchedTech = knownSkills.filter((s) => new RegExp(`\\b${s.replace('+', '\\+')}\\b`, 'i').test(desc));
+      const urlMatch = desc.match(URL_REGEX);
+
+      currentProject = {
+        name,
+        description: desc,
+        technologies: Array.from(new Set(matchedTech)),
+        link: urlMatch ? urlMatch[0] : '',
+      };
+      continue;
+    }
+
+    const bulletMatch = rawLine.match(BULLET_REGEX);
+    if (bulletMatch && currentProject) {
+      currentProject.description += (currentProject.description ? ' ' : '') + bulletMatch[1].trim();
+      const matchedTech = knownSkills.filter((s) => new RegExp(`\\b${s.replace('+', '\\+')}\\b`, 'i').test(bulletMatch[1]));
+      matchedTech.forEach((t) => {
+        if (!currentProject.technologies.includes(t)) currentProject.technologies.push(t);
+      });
+      continue;
+    }
+
+    if (projLines.length > 0 && rawLine.length < 50 && !rawLine.startsWith('-')) {
+      if (currentProject) entries.push(currentProject);
+
+      const name = rawLine.replace(/\(.*?\)/, '').trim();
+      const matchedTech = knownSkills.filter((s) => new RegExp(`\\b${s.replace('+', '\\+')}\\b`, 'i').test(rawLine));
+
+      currentProject = {
+        name: name || rawLine,
+        description: '',
+        technologies: Array.from(new Set(matchedTech)),
+        link: '',
+      };
+    } else if (currentProject) {
+      currentProject.description += (currentProject.description ? ' ' : '') + rawLine;
+    }
+  }
+
+  if (currentProject) {
+    entries.push(currentProject);
+  }
+
+  return entries;
+};
+
+/**
+ * Helper to parse certifications
+ */
+const parseCertificationsSection = (certLines) => {
+  const certs = [];
+  certLines.forEach((line) => {
+    const cleaned = line.replace(/^[-*•–·]\s*/, '').trim();
+    if (cleaned && cleaned.length > 3 && !cleaned.toLowerCase().startsWith('cert')) {
+      certs.push(cleaned);
+    }
+  });
+  return certs;
+};
+
 /**
  * Heuristic fallback parser when AI API key is omitted or provider is unreachable.
- * Extracts real sections, keywords, and skills strictly without hallucination.
+ * Extracts real sections, keywords, experience, education, projects, and skills strictly without hallucination.
  */
-const fallbackResumeParser = (rawText) => {
-  const lines = rawText.split('\n').map((l) => l.trim()).filter(Boolean);
-  const commonLangs = ['javascript', 'typescript', 'python', 'java', 'c++', 'c#', 'go', 'ruby', 'php', 'swift', 'kotlin', 'rust', 'sql', 'html', 'css'];
-  const commonFrameworks = ['react', 'vue', 'angular', 'next.js', 'express', 'node.js', 'django', 'flask', 'spring', 'fastapi', 'nest.js', 'tailwind', 'redux'];
-  const commonDatabases = ['mongodb', 'postgresql', 'mysql', 'redis', 'sqlite', 'elasticsearch', 'dynamodb', 'cassandra'];
-  const commonTools = ['git', 'docker', 'kubernetes', 'aws', 'azure', 'gcp', 'jira', 'linux', 'ci/cd', 'github actions', 'postman', 'jest'];
+export const fallbackResumeParser = (rawText = '') => {
+  if (!rawText) return getEmptyProfile();
 
-  const lowerText = rawText.toLowerCase();
+  const lines = rawText.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+  const cleanedLines = lines.map((l) => l.trim());
 
-  const foundLangs = commonLangs.filter((s) => new RegExp(`\\b${s.replace('+', '\\+')}\\b`, 'i').test(lowerText));
-  const foundFrameworks = commonFrameworks.filter((s) => new RegExp(`\\b${s.replace('.', '\\.')}\\b`, 'i').test(lowerText));
-  const foundDbs = commonDatabases.filter((s) => new RegExp(`\\b${s}\\b`, 'i').test(lowerText));
-  const foundTools = commonTools.filter((s) => new RegExp(`\\b${s.replace('/', '\\/')}\\b`, 'i').test(lowerText));
+  const SECTION_HEADERS = [
+    { type: 'summary', regex: /^(?:professional\s+|career\s+)?(?:summary|profile|about(?:\s+me)?|objective|overview)[:\s]*$/i },
+    { type: 'skills', regex: /^(?:technical\s+|core\s+|key\s+)?(?:skills|competencies|technologies|tech\s+stack|expertise)[:\s]*$/i },
+    { type: 'experience', regex: /^(?:work\s+|professional\s+|relevant\s+|employment\s+)?(?:experience|history|employment)[:\s]*$/i },
+    { type: 'projects', regex: /^(?:featured\s+|personal\s+|key\s+|academic\s+|technical\s+)?(?:projects)[:\s]*$/i },
+    { type: 'education', regex: /^(?:education(?:al)?|academic\s+background|academic\s+qualifications?|academics|education\s+&\s+credentials)[:\s]*$/i },
+    { type: 'certifications', regex: /^(?:certifications?|certificates?|licenses?)[:\s]*$/i },
+  ];
 
-  // Extract brief summary
-  const summaryLine = lines.slice(0, 4).join(' ').substring(0, 300);
+  const INLINE_HEADER_REGEX = /^(summary|skills|experience|work\s+experience|projects|education|certifications):\s*(.+)$/i;
+
+  const sections = {
+    summary: [],
+    skills: [],
+    experience: [],
+    projects: [],
+    education: [],
+    certifications: [],
+    general: [],
+  };
+
+  let currentSection = 'general';
+
+  for (let i = 0; i < cleanedLines.length; i++) {
+    const line = cleanedLines[i];
+    if (!line) continue;
+
+    const inlineMatch = line.match(INLINE_HEADER_REGEX);
+    if (inlineMatch) {
+      const headerWord = inlineMatch[1].toLowerCase().replace(/\s+/g, '');
+      const content = inlineMatch[2].trim();
+      let matchedType = null;
+      if (headerWord.includes('summary')) matchedType = 'summary';
+      else if (headerWord.includes('skill')) matchedType = 'skills';
+      else if (headerWord.includes('experience')) matchedType = 'experience';
+      else if (headerWord.includes('project')) matchedType = 'projects';
+      else if (headerWord.includes('education')) matchedType = 'education';
+      else if (headerWord.includes('cert')) matchedType = 'certifications';
+
+      if (matchedType) {
+        currentSection = matchedType;
+        if (content) sections[currentSection].push(content);
+        continue;
+      }
+    }
+
+    const matchedHeader = SECTION_HEADERS.find((h) => h.regex.test(line));
+    if (matchedHeader) {
+      currentSection = matchedHeader.type;
+      continue;
+    }
+
+    sections[currentSection].push(line);
+  }
+
+  // 1. Parse Skills
+  const commonLangs = ['javascript', 'typescript', 'python', 'java', 'c++', 'c#', 'go', 'ruby', 'php', 'swift', 'kotlin', 'rust', 'sql', 'html', 'css', 'r', 'scala', 'dart'];
+  const commonFrameworks = ['react', 'vue', 'angular', 'next.js', 'express', 'node.js', 'django', 'flask', 'spring', 'fastapi', 'nest.js', 'tailwind', 'tailwind css', 'redux', 'bootstrap', 'svelte', 'fastify', 'asp.net', 'laravel'];
+  const commonDatabases = ['mongodb', 'postgresql', 'mysql', 'redis', 'sqlite', 'elasticsearch', 'dynamodb', 'cassandra', 'mariadb', 'oracle', 'firebase', 'supabase'];
+  const commonTools = ['git', 'docker', 'kubernetes', 'aws', 'azure', 'gcp', 'jira', 'linux', 'ci/cd', 'github actions', 'postman', 'jest', 'webpack', 'vite', 'npm', 'yarn', 'pnpm', 'terraform', 'jenkins'];
+
+  const lowerFullText = rawText.toLowerCase();
+
+  const foundLangs = commonLangs.filter((s) => new RegExp(`\\b${s.replace('+', '\\+')}\\b`, 'i').test(lowerFullText));
+  const foundFrameworks = commonFrameworks.filter((s) => new RegExp(`\\b${s.replace('.', '\\.')}\\b`, 'i').test(lowerFullText));
+  const foundDbs = commonDatabases.filter((s) => new RegExp(`\\b${s}\\b`, 'i').test(lowerFullText));
+  const foundTools = commonTools.filter((s) => new RegExp(`\\b${s.replace('/', '\\/')}\\b`, 'i').test(lowerFullText));
+
+  const customSkills = [];
+  if (sections.skills.length > 0) {
+    sections.skills.forEach((line) => {
+      const parts = line.split(/[,;|•·\t]/).map((p) => p.trim().replace(/^[-*•]\s*/, '')).filter(Boolean);
+      parts.forEach((p) => {
+        if (p.length > 1 && p.length < 35 && !p.toLowerCase().startsWith('skills') && !customSkills.includes(p)) {
+          customSkills.push(p);
+        }
+      });
+    });
+  }
+
+  // 2. Parse Professional Summary
+  let summary = '';
+  if (sections.summary.length > 0) {
+    summary = sections.summary.join(' ').substring(0, 500);
+  } else if (sections.general.length > 0) {
+    const candidateSummary = sections.general.slice(1, 4).join(' ');
+    if (candidateSummary.length > 30) {
+      summary = candidateSummary.substring(0, 400);
+    }
+  }
+
+  const allSkillsList = [...foundLangs, ...foundFrameworks, ...foundDbs, ...foundTools];
 
   return {
-    professionalSummary: summaryLine || 'Experienced professional with technical background.',
-    programmingLanguages: foundLangs,
-    frameworks: foundFrameworks,
-    databases: foundDbs,
-    tools: foundTools,
-    otherSkills: [],
+    professionalSummary: summary || 'Technical professional with demonstrated software development experience.',
+    programmingLanguages: Array.from(new Set(foundLangs)),
+    frameworks: Array.from(new Set(foundFrameworks)),
+    databases: Array.from(new Set(foundDbs)),
+    tools: Array.from(new Set(foundTools)),
+    otherSkills: Array.from(new Set(customSkills)),
+    experience: parseExperienceSection(sections.experience, cleanedLines),
+    education: parseEducationSection(sections.education, cleanedLines),
+    projects: parseProjectsSection(sections.projects, cleanedLines, allSkillsList),
+    certifications: parseCertificationsSection(sections.certifications),
+  };
+};
+
+/**
+ * Normalizes resume profile object across various LLM or parser outputs
+ */
+export const normalizeResumeProfile = (profile = {}, rawText = '') => {
+  const norm = {
+    professionalSummary: profile.professionalSummary || profile.summary || profile.profileSummary || profile.about || '',
+    programmingLanguages: Array.isArray(profile.programmingLanguages) ? profile.programmingLanguages : [],
+    frameworks: Array.isArray(profile.frameworks) ? profile.frameworks : [],
+    databases: Array.isArray(profile.databases) ? profile.databases : [],
+    tools: Array.isArray(profile.tools) ? profile.tools : [],
+    otherSkills: Array.isArray(profile.otherSkills) ? profile.otherSkills : (Array.isArray(profile.skills) ? profile.skills : []),
     experience: [],
     education: [],
     projects: [],
-    certifications: [],
+    certifications: Array.isArray(profile.certifications) ? profile.certifications : (Array.isArray(profile.certificates) ? profile.certificates : []),
   };
+
+  const rawExp = profile.experience || profile.experiences || profile.workExperience || profile.work_experience || profile.employmentHistory || profile.employment || [];
+  if (Array.isArray(rawExp)) {
+    norm.experience = rawExp.map((item) => {
+      if (typeof item === 'string') {
+        return {
+          title: item,
+          company: '',
+          location: '',
+          startDate: '',
+          endDate: '',
+          current: false,
+          description: item,
+          achievements: [],
+        };
+      }
+      return {
+        title: item.title || item.role || item.position || item.jobTitle || 'Role',
+        company: item.company || item.employer || item.organization || '',
+        location: item.location || '',
+        startDate: item.startDate || item.start_date || item.from || '',
+        endDate: item.endDate || item.end_date || item.to || '',
+        current: Boolean(item.current || item.isCurrent || (item.endDate && /present|current/i.test(item.endDate))),
+        description: item.description || item.summary || item.details || '',
+        achievements: Array.isArray(item.achievements)
+          ? item.achievements
+          : Array.isArray(item.highlights)
+          ? item.highlights
+          : Array.isArray(item.responsibilities)
+          ? item.responsibilities
+          : [],
+      };
+    }).filter((e) => e.title || e.company || e.description);
+  }
+
+  const rawEdu = profile.education || profile.educations || profile.academic || profile.academics || profile.academicBackground || [];
+  if (Array.isArray(rawEdu)) {
+    norm.education = rawEdu.map((item) => {
+      if (typeof item === 'string') {
+        return {
+          institution: item,
+          degree: '',
+          fieldOfStudy: '',
+          graduationYear: '',
+        };
+      }
+      return {
+        institution: item.institution || item.school || item.university || item.college || 'Institution',
+        degree: item.degree || item.qualification || '',
+        fieldOfStudy: item.fieldOfStudy || item.field || item.major || '',
+        graduationYear: String(item.graduationYear || item.year || item.gradYear || item.endDate || ''),
+      };
+    }).filter((e) => e.institution || e.degree);
+  }
+
+  const rawProj = profile.projects || profile.projectList || profile.personalProjects || profile.keyProjects || [];
+  if (Array.isArray(rawProj)) {
+    norm.projects = rawProj.map((item) => {
+      if (typeof item === 'string') {
+        return {
+          name: item,
+          description: '',
+          technologies: [],
+          link: '',
+        };
+      }
+      return {
+        name: item.name || item.title || item.projectName || 'Project',
+        description: item.description || item.details || item.summary || '',
+        technologies: Array.isArray(item.technologies)
+          ? item.technologies
+          : Array.isArray(item.tech)
+          ? item.tech
+          : Array.isArray(item.skills)
+          ? item.skills
+          : [],
+        link: item.link || item.url || '',
+      };
+    }).filter((p) => p.name || p.description);
+  }
+
+  // If experience, education, or projects are empty and rawText is available, run fallback extraction to backfill
+  if (rawText && (norm.experience.length === 0 || norm.education.length === 0 || norm.projects.length === 0)) {
+    const fallbackData = fallbackResumeParser(rawText);
+    if (norm.experience.length === 0 && fallbackData.experience.length > 0) {
+      norm.experience = fallbackData.experience;
+    }
+    if (norm.education.length === 0 && fallbackData.education.length > 0) {
+      norm.education = fallbackData.education;
+    }
+    if (norm.projects.length === 0 && fallbackData.projects.length > 0) {
+      norm.projects = fallbackData.projects;
+    }
+    if (!norm.professionalSummary && fallbackData.professionalSummary) {
+      norm.professionalSummary = fallbackData.professionalSummary;
+    }
+  }
+
+  return norm;
 };
 
 /**
@@ -181,7 +676,7 @@ Return valid JSON adhering exactly to this structure:
     if (!parsed) {
       throw new Error('LLM returned invalid JSON structure');
     }
-    return parsed;
+    return normalizeResumeProfile(parsed, rawText);
   } catch (error) {
     logger.error(`AI resume parsing failed: ${error.message}, falling back to deterministic extractor`, error);
     return fallbackResumeParser(rawText);

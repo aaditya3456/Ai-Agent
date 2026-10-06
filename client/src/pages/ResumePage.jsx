@@ -323,11 +323,15 @@ export const ResumePage = () => {
                   <div key={idx} className="p-4 rounded-xl bg-slate-950 border border-slate-800/80 space-y-2">
                     <div className="flex flex-col sm:flex-row sm:items-center justify-between">
                       <h4 className="text-sm font-semibold text-slate-200">
-                        {exp.title} <span className="text-emerald-400">@ {exp.company}</span>
+                        {exp.title} {exp.company ? <span className="text-emerald-400">@ {exp.company}</span> : null}
                       </h4>
-                      <span className="text-xs text-slate-400">
-                        {exp.startDate} - {exp.current ? 'Present' : exp.endDate || 'N/A'}
-                      </span>
+                      {(exp.startDate || exp.endDate || exp.current) && (
+                        <span className="text-xs text-slate-400">
+                          {exp.startDate ? `${exp.startDate} ` : ''}
+                          {(exp.startDate && (exp.endDate || exp.current)) ? '- ' : ''}
+                          {exp.current ? 'Present' : exp.endDate || ''}
+                        </span>
+                      )}
                     </div>
                     {exp.description && <p className="text-xs text-slate-300">{exp.description}</p>}
                     {exp.achievements?.length > 0 && (

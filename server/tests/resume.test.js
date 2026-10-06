@@ -50,6 +50,25 @@ BS in Computer Science, State University, 2020.`
     expect(res.body.data.resume.fileType).toBe('txt');
     expect(res.body.data.resume.skills.length).toBeGreaterThan(0);
     expect(res.body.data.resume.skills).toContain('javascript');
+
+    // Verify Experience extraction
+    expect(res.body.data.resume.parsedProfile.experience.length).toBeGreaterThan(0);
+    const exp = res.body.data.resume.parsedProfile.experience[0];
+    expect(exp.title).toContain('Developer');
+    expect(exp.company).toBe('Acme Corp');
+    expect(exp.achievements.length).toBeGreaterThan(0);
+
+    // Verify Education extraction
+    expect(res.body.data.resume.parsedProfile.education.length).toBeGreaterThan(0);
+    const edu = res.body.data.resume.parsedProfile.education[0];
+    expect(edu.institution).toContain('State University');
+    expect(edu.degree).toBe('BS');
+
+    // Verify Projects extraction
+    expect(res.body.data.resume.parsedProfile.projects.length).toBeGreaterThan(0);
+    const proj = res.body.data.resume.parsedProfile.projects[0];
+    expect(proj.name).toBe('Cloud Dashboard');
+    expect(proj.technologies).toContain('react');
   });
 
   it('should reject unsupported file extensions', async () => {

@@ -44,6 +44,7 @@ export const uploadResume = async (req, res, next) => {
       resume.parsedProfile = parsedProfile;
       resume.skills = allSkills;
       resume.isAnalyzed = true;
+      resume.markModified('parsedProfile');
       await resume.save();
 
       // Automatically re-evaluate matching on user's existing saved jobs
@@ -115,6 +116,7 @@ export const analyzeResumeById = async (req, res, next) => {
     resume.parsedProfile = parsedProfile;
     resume.skills = allSkills;
     resume.isAnalyzed = true;
+    resume.markModified('parsedProfile');
     await resume.save();
 
     // Re-evaluate user jobs
